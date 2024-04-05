@@ -7704,71 +7704,9 @@ static int check_mem_access(struct bpf_verifier_env *env, int insn_idx, u32 regn
 }
 
 static int save_aux_ptr_type(struct bpf_verifier_env *env, enum bpf_reg_type type,
-			     bool allow_trust_mismatch);
+			     bool allow_trust_missmatch);
 
-static int check_load_mem(struct bpf_verifier_env *env, struct bpf_insn *insn,
-			  bool strict_alignment_once, bool is_ldsx,
-			  bool allow_trust_mismatch, const char *ctx)
-{
-	struct bpf_reg_state *regs = cur_regs(env);
-	enum bpf_reg_type src_reg_type;
-	int err;
-
-	/* check src operand */
-	err = check_reg_arg(env, insn->src_reg, SRC_OP);
-	if (err)
-		return err;
-
-	/* check dst operand */
-	err = check_reg_arg(env, insn->dst_reg, DST_OP_NO_MARK);
-	if (err)
-		return err;
-
-	src_reg_type = regs[insn->src_reg].type;
-
-	/* Check if (src_reg + off) is readable. The state of dst_reg will be
-	 * updated by this call.
-	 */
-	err = check_mem_access(env, env->insn_idx, insn->src_reg, insn->off,
-			       BPF_SIZE(insn->code), BPF_READ, insn->dst_reg,
-			       strict_alignment_once, is_ldsx);
-	err = err ?: save_aux_ptr_type(env, src_reg_type,
-				       allow_trust_mismatch);
-	err = err ?: reg_bounds_sanity_check(env, &regs[insn->dst_reg], ctx);
-
-	return err;
-}
-
-static int check_store_reg(struct bpf_verifier_env *env, struct bpf_insn *insn,
-			   bool strict_alignment_once)
-{
-	struct bpf_reg_state *regs = cur_regs(env);
-	enum bpf_reg_type dst_reg_type;
-	int err;
-
-	/* check src1 operand */
-	err = check_reg_arg(env, insn->src_reg, SRC_OP);
-	if (err)
-		return err;
-
-	/* check src2 operand */
-	err = check_reg_arg(env, insn->dst_reg, SRC_OP);
-	if (err)
-		return err;
-
-	dst_reg_type = regs[insn->dst_reg].type;
-
-	/* Check if (dst_reg + off) is writeable. */
-	err = check_mem_access(env, env->insn_idx, insn->dst_reg, insn->off,
-			       BPF_SIZE(insn->code), BPF_WRITE, insn->src_reg,
-			       strict_alignment_once, false);
-	err = err ?: save_aux_ptr_type(env, dst_reg_type, false);
-
-	return err;
-}
-
-static int check_atomic_rmw(struct bpf_verifier_env *env,
-			    struct bpf_insn *insn)
+static int check_atomic(struct bpf_verifier_env *env, int insn_idx, struct bpf_insn *insn)
 {
 	int load_reg;
 	int err;
@@ -7807,7 +7745,11 @@ static int check_atomic_rmw(struct bpf_verifier_env *env,
 		return -EACCES;
 	}
 
-	if (!atomic_ptr_type_ok(env, insn->dst_reg, insn)) {
+	if (is_ctx_reg(env, insn->dst_reg) ||
+	    is_pkt_reg(env, insn->dst_reg) ||
+	    is_flow_key_reg(env, insn->dst_reg) ||
+	    is_sk_reg(env, insn->dst_reg) ||
+	    (is_arena_reg(env, insn->dst_reg) && !bpf_jit_supports_insn(insn, true))) {
 		verbose(env, "BPF_ATOMIC stores into R%d %s is not allowed\n",
 			insn->dst_reg,
 			reg_type_str(env, reg_state(env, insn->dst_reg)->type));
@@ -21304,33 +21246,12 @@ static int convert_ctx_accesses(struct bpf_verifier_env *env)
 			   insn->code == (BPF_ST | BPF_MEM | BPF_W) ||
 			   insn->code == (BPF_ST | BPF_MEM | BPF_DW)) {
 			type = BPF_WRITE;
-		} else if ((insn->code == (BPF_STX | BPF_ATOMIC | BPF_B) ||
-			    insn->code == (BPF_STX | BPF_ATOMIC | BPF_H) ||
-			    insn->code == (BPF_STX | BPF_ATOMIC | BPF_W) ||
+		} else if ((insn->code == (BPF_STX | BPF_ATOMIC | BPF_W) ||
 			    insn->code == (BPF_STX | BPF_ATOMIC | BPF_DW)) &&
 			   env->insn_aux_data[i + delta].ptr_type == PTR_TO_ARENA) {
 			insn->code = BPF_STX | BPF_PROBE_ATOMIC | BPF_SIZE(insn->code);
 			env->prog->aux->num_exentries++;
 			continue;
-		} else if (insn->code == (BPF_JMP | BPF_EXIT) &&
-			   epilogue_cnt &&
-			   i + delta < subprogs[1].start) {
-			/* Generate epilogue for the main prog */
-			if (epilogue_idx) {
-				/* jump back to the earlier generated epilogue */
-				insn_buf[0] = BPF_JMP32_A(epilogue_idx - i - delta - 1);
-				cnt = 1;
-			} else {
-				memcpy(insn_buf, epilogue_buf,
-				       epilogue_cnt * sizeof(*epilogue_buf));
-				cnt = epilogue_cnt;
-				/* epilogue_idx cannot be 0. It must have at
-				 * least one ctx ptr saving insn before the
-				 * epilogue.
-				 */
-				epilogue_idx = i + delta;
-			}
-			goto patch_insn_buf;
 		} else {
 			continue;
 		}

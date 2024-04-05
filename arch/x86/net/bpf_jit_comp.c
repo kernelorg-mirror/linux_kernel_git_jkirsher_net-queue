@@ -1324,9 +1324,8 @@ static int emit_atomic_rmw(u8 **pprog, u32 atomic_op,
 	return 0;
 }
 
-static int emit_atomic_rmw_index(u8 **pprog, u32 atomic_op, u32 size,
-				 u32 dst_reg, u32 src_reg, u32 index_reg,
-				 int off)
+static int emit_atomic_index(u8 **pprog, u8 atomic_op, u32 size,
+			     u32 dst_reg, u32 src_reg, u32 index_reg, int off)
 {
 	u8 *prog = *pprog;
 
@@ -1339,7 +1338,7 @@ static int emit_atomic_rmw_index(u8 **pprog, u32 atomic_op, u32 size,
 		EMIT1(add_3mod(0x48, dst_reg, src_reg, index_reg));
 		break;
 	default:
-		pr_err("bpf_jit: 1- and 2-byte RMW atomics are not supported\n");
+		pr_err("bpf_jit: 1 and 2 byte atomics are not supported\n");
 		return -EFAULT;
 	}
 
@@ -1372,81 +1371,6 @@ static int emit_atomic_rmw_index(u8 **pprog, u32 atomic_op, u32 size,
 	*pprog = prog;
 	return 0;
 }
-
-static int emit_atomic_ld_st(u8 **pprog, u32 atomic_op, u32 dst_reg,
-			     u32 src_reg, s16 off, u8 bpf_size)
-{
-	switch (atomic_op) {
-	case BPF_LOAD_ACQ:
-		/* dst_reg = smp_load_acquire(src_reg + off16) */
-		emit_ldx(pprog, bpf_size, dst_reg, src_reg, off);
-		break;
-	case BPF_STORE_REL:
-		/* smp_store_release(dst_reg + off16, src_reg) */
-		emit_stx(pprog, bpf_size, dst_reg, src_reg, off);
-		break;
-	default:
-		pr_err("bpf_jit: unknown atomic load/store opcode %02x\n",
-		       atomic_op);
-		return -EFAULT;
-	}
-
-	return 0;
-}
-
-static int emit_atomic_ld_st_index(u8 **pprog, u32 atomic_op, u32 size,
-				   u32 dst_reg, u32 src_reg, u32 index_reg,
-				   int off)
-{
-	switch (atomic_op) {
-	case BPF_LOAD_ACQ:
-		/* dst_reg = smp_load_acquire(src_reg + idx_reg + off16) */
-		emit_ldx_index(pprog, size, dst_reg, src_reg, index_reg, off);
-		break;
-	case BPF_STORE_REL:
-		/* smp_store_release(dst_reg + idx_reg + off16, src_reg) */
-		emit_stx_index(pprog, size, dst_reg, src_reg, index_reg, off);
-		break;
-	default:
-		pr_err("bpf_jit: unknown atomic load/store opcode %02x\n",
-		       atomic_op);
-		return -EFAULT;
-	}
-
-	return 0;
-}
-
-/*
- * Metadata encoding for exception handling in JITed code.
- *
- * Format of `fixup` and `data` fields in `struct exception_table_entry`:
- *
- * Bit layout of `fixup` (32-bit):
- *
- * +-----------+--------+-----------+---------+----------+
- * | 31        | 30-24  |   23-16   |   15-8  |    7-0   |
- * |           |        |           |         |          |
- * | ARENA_ACC | Unused | ARENA_REG | DST_REG | INSN_LEN |
- * +-----------+--------+-----------+---------+----------+
- *
- * - INSN_LEN (8 bits): Length of faulting insn (max x86 insn = 15 bytes (fits in 8 bits)).
- * - DST_REG  (8 bits): Offset of dst_reg from reg2pt_regs[] (max offset = 112 (fits in 8 bits)).
- *                      This is set to DONT_CLEAR if the insn is a store.
- * - ARENA_REG (8 bits): Offset of the register that is used to calculate the
- *                       address for load/store when accessing the arena region.
- * - ARENA_ACCESS (1 bit): This bit is set when the faulting instruction accessed the arena region.
- *
- * Bit layout of `data` (32-bit):
- *
- * +--------------+--------+--------------+
- * |	31-16	  |  15-8  |     7-0      |
- * |              |	   |              |
- * | ARENA_OFFSET | Unused |  EX_TYPE_BPF |
- * +--------------+--------+--------------+
- *
- * - ARENA_OFFSET (16 bits): Offset used to calculate the address for load/store when
- *                           accessing the arena region.
- */
 
 #define DONT_CLEAR 1
 #define FIXUP_INSN_LEN_MASK	GENMASK(7, 0)
@@ -2391,25 +2315,11 @@ populate_extable:
 				return err;
 			break;
 
-		case BPF_STX | BPF_PROBE_ATOMIC | BPF_B:
-		case BPF_STX | BPF_PROBE_ATOMIC | BPF_H:
-			if (!bpf_atomic_is_load_store(insn)) {
-				pr_err("bpf_jit: 1- and 2-byte RMW atomics are not supported\n");
-				return -EFAULT;
-			}
-			fallthrough;
 		case BPF_STX | BPF_PROBE_ATOMIC | BPF_W:
 		case BPF_STX | BPF_PROBE_ATOMIC | BPF_DW:
 			start_of_ldx = prog;
-
-			if (bpf_atomic_is_load_store(insn))
-				err = emit_atomic_ld_st_index(&prog, insn->imm,
-							      BPF_SIZE(insn->code), dst_reg,
-							      src_reg, X86_REG_R12, insn->off);
-			else
-				err = emit_atomic_rmw_index(&prog, insn->imm, BPF_SIZE(insn->code),
-							    dst_reg, src_reg, X86_REG_R12,
-							    insn->off);
+			err = emit_atomic_index(&prog, insn->imm, BPF_SIZE(insn->code),
+						dst_reg, src_reg, X86_REG_R12, insn->off);
 			if (err)
 				return err;
 			goto populate_extable;
