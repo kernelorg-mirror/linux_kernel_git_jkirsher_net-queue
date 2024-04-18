@@ -891,7 +891,7 @@ static int ieee80211_assign_link_chanctx(struct ieee80211_link_data *link,
 	struct ieee80211_chanctx_conf *conf;
 	struct ieee80211_chanctx *curr_ctx = NULL;
 	bool new_idle;
-	int ret;
+	int ret = 0;
 
 	if (WARN_ON(sdata->vif.type == NL80211_IFTYPE_NAN))
 		return -EOPNOTSUPP;
