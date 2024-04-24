@@ -563,9 +563,49 @@ static void __unix_gc(struct work_struct *work)
 
 	spin_lock(&unix_gc_lock);
 
-	if (!unix_graph_maybe_cyclic) {
-		spin_unlock(&unix_gc_lock);
-		goto skip_gc;
+	/* First, select candidates for garbage collection.  Only
+	 * in-flight sockets are considered, and from those only ones
+	 * which don't have any external reference.
+	 *
+	 * Holding unix_gc_lock will protect these candidates from
+	 * being detached, and hence from gaining an external
+	 * reference.  Since there are no possible receivers, all
+	 * buffers currently on the candidates' queues stay there
+	 * during the garbage collection.
+	 *
+	 * We also know that no new candidate can be added onto the
+	 * receive queues.  Other, non candidate sockets _can_ be
+	 * added to queue, so we must make sure only to touch
+	 * candidates.
+	 *
+	 * Embryos, though never candidates themselves, affect which
+	 * candidates are reachable by the garbage collector.  Before
+	 * being added to a listener's queue, an embryo may already
+	 * receive data carrying SCM_RIGHTS, potentially making the
+	 * passed socket a candidate that is not yet reachable by the
+	 * collector.  It becomes reachable once the embryo is
+	 * enqueued.  Therefore, we must ensure that no SCM-laden
+	 * embryo appears in a (candidate) listener's queue between
+	 * consecutive scan_children() calls.
+	 */
+	list_for_each_entry_safe(u, next, &gc_inflight_list, link) {
+		struct sock *sk = &u->sk;
+		long total_refs;
+
+		total_refs = file_count(sk->sk_socket->file);
+
+		WARN_ON_ONCE(!u->inflight);
+		WARN_ON_ONCE(total_refs < u->inflight);
+		if (total_refs == u->inflight) {
+			list_move_tail(&u->link, &gc_candidates);
+			__set_bit(UNIX_GC_CANDIDATE, &u->gc_flags);
+			__set_bit(UNIX_GC_MAYBE_CYCLE, &u->gc_flags);
+
+			if (sk->sk_state == TCP_LISTEN) {
+				unix_state_lock_nested(sk, U_LOCK_GC_LISTENER);
+				unix_state_unlock(sk);
+			}
+		}
 	}
 
 	__skb_queue_head_init(&hitlist);
